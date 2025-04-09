@@ -26,6 +26,41 @@
       "console": "integratedTerminal",
       "justMyCode": true
     },
+
+    {
+      "name": "Python: train splatfacto-big",
+      "type": "python",
+      "request": "launch",
+      "program": "nerfstudio/scripts/train.py",
+      "console": "integratedTerminal",
+      "args": [
+        "splatfacto-big",
+        // "--data","D:/yzx_code/test_data/dianxingshuzishenghuoBackend/282/282_studio" ,
+        "--data","D:/yzx_code/test_data/dianxingshuzishenghuoBackend/281/dense",
+        "--output-dir", "D:/yzx_code/output_result/281/splatfactor_b_mcmc_nopose_lidar_points" ,
+        "--pipeline.model.num-downscales=0",
+        "--pipeline.model.sh-degree=0",
+        "--pipeline.datamanager.cache-images=cpu",
+        "--pipeline.model.use_bilateral_grid", "True",
+        // "--pipeline.model.output-depth-during-training", "True",
+        "--pipeline.model.strategy", "mcmc",
+        "--pipeline.model.max_gs_num","2000000",
+        // "--pipeline.model.use_depth_loss", "True",  // added 
+        // "--pipeline.model.vis_depth", "D:/yzx_code/test_data/dianxingshuzishenghuoBackend/282/vis_nerfstudio_noscale_depth",
+        "--vis", "wandb",
+        "--pipeline.model.progress_path", "D:/yzx_code/output_result/281/splatfactor_b_mcmc_nopose_lidar_points/progress_log",
+        // "--viewer.no-enable",
+        // "--logging.event-writer=wandb",
+        "colmap",
+        // "--depths-path","D:/yzx_code/test_data/dianxingshuzishenghuoBackend/282/data",
+        "--orientation-method","none",
+        "--center-method", "none",
+        "--auto-scale-poses", "False",
+        "--assume-colmap-world-coordinate-convention", "False",
+        ""
+        
+      ]
+    },
     {
       "name": "Python: train",
       "type": "python",
