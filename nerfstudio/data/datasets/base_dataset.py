@@ -44,7 +44,7 @@ class InputDataset(Dataset):
         scale_factor: The scaling factor for the dataparser outputs
     """
 
-    exclude_batch_keys_from_device: List[str] = ["image", "mask"]
+    exclude_batch_keys_from_device: List[str] = ["image", "mask","depth","depth_conf"]
     cameras: Cameras
 
     def __init__(
@@ -112,7 +112,7 @@ class InputDataset(Dataset):
             ).all(), "alpha color given is out of range between [0, 1]."
             image = image[:, :, :3] * image[:, :, -1:] + self._dataparser_outputs.alpha_color * (1.0 - image[:, :, -1:])
         return image
-
+    
     def get_image_uint8(self, image_idx: int) -> UInt8[Tensor, "image_height image_width num_channels"]:
         """Returns a 3 channel image in uint8 torch.Tensor.
 
@@ -132,6 +132,80 @@ class InputDataset(Dataset):
             image = torch.clamp(image, min=0, max=255).to(torch.uint8)
         return image
 
+    def get_depth_tensor(self, depth_idx: int) -> Float[Tensor, "height width"]:
+        """读取深度图并返回为 torch.Tensor。
+
+        Args:
+            depth_idx: 深度图的索引。
+
+        Returns:
+            torch.Tensor: 深度图，形状为 (height, width)。
+        """
+        depth_filename = self.metadata["depth_filenames"][depth_idx]
+        try:
+            with open(depth_filename, 'rb') as infile:
+                # 读取类型标记
+                type = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+
+                # 读取高度 (h), 宽度 (w), 通道数 (c)
+                h = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+                w = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+                c = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+
+                # 读取数据部分
+                data = np.frombuffer(infile.read(), dtype=np.float32)
+
+                # 重塑数据为 (h, w) 形状（单通道）
+                data_map = data.reshape(h, w).copy()
+
+                # 转换为 torch.Tensor
+                depth_tensor = torch.from_numpy(data_map)
+
+                return depth_tensor
+        except IOError:
+            print(f"Error opening file {depth_filename}")
+            return None
+        except Exception as e:
+            print(f"Error reading the file {depth_filename}: {e}")
+            return None
+
+    def get_depth_conf_tensor(self, idx: int) -> Float[Tensor, "height width"]:
+        """读取深度图并返回为 torch.Tensor。
+
+        Args:
+            depth_idx: 深度图的索引。
+
+        Returns:
+            torch.Tensor: 深度图，形状为 (height, width)。
+        """
+        depth_filename = self.metadata["confidence_filenames"][idx]
+        try:
+            with open(depth_filename, 'rb') as infile:
+                # 读取类型标记
+                type = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+
+                # 读取高度 (h), 宽度 (w), 通道数 (c)
+                h = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+                w = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+                c = np.frombuffer(infile.read(4), dtype=np.int32)[0]
+
+                # 读取数据部分
+                data = np.frombuffer(infile.read(), dtype=np.int8)
+
+                # 重塑数据为 (h, w) 形状（单通道）
+                data_map = data.reshape(h, w).copy()
+
+                # 转换为 torch.Tensor
+                depth_tensor = torch.from_numpy(data_map)
+
+                return depth_tensor
+        except IOError:
+            print(f"Error opening file {depth_filename}")
+            return None
+        except Exception as e:
+            print(f"Error reading the file {depth_filename}: {e}")
+            return None
+    
     def get_data(self, image_idx: int, image_type: Literal["uint8", "float32"] = "float32") -> Dict:
         """Returns the ImageDataset data as a dictionary.
 
@@ -168,10 +242,24 @@ class InputDataset(Dataset):
         """Method that can be used to process any additional metadata that may be part of the model inputs.
 
         Args:
-            image_idx: The image index in the dataset.
+            data: The current data dictionary for a specific image.
+
+        Returns:
+            A dictionary containing additional metadata to be added to the data.
         """
-        del data
-        return {}
+        metadata = {}
+
+        # 加载深度图
+        if "depth_filenames" in self.metadata and self.metadata["depth_filenames"] is not None:
+            idx = data["image_idx"]
+            depth = self.get_depth_tensor(idx)
+            depth_conf = self.get_depth_conf_tensor(idx)
+
+            if depth is not None and depth_conf is not None:
+                metadata["depth"] = depth
+                metadata["depth_conf"] = depth_conf
+
+        return metadata
 
     def __getitem__(self, image_idx: int) -> Dict:
         data = self.get_data(image_idx)

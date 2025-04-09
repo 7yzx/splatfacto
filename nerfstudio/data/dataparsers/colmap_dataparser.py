@@ -101,8 +101,13 @@ class ColmapDataParserConfig(DataParserConfig):
     generally unused otherwise, but it's typically harmless so we default to True."""
     max_2D_matches_per_3D_point: int = 0
     """Maximum number of 2D matches per 3D point. If set to -1, all 2D matches are loaded. If set to 0, no 2D matches are loaded."""
-
-
+    load_ply_path: Optional[Path] = None
+    """Path of the ply file for more points3D. """
+    resample: bool = False
+    """downsample resample,default is False"""
+    load_combined_ply: bool = False
+    """Whether to load the combined using sfm and lidar"""
+    
 class ColmapDataParser(DataParser):
     """COLMAP DatasetParser.
     Expects a folder with the following structure:
@@ -180,9 +185,20 @@ class ColmapDataParser(DataParser):
                     (self.config.data / self.config.masks_path / im_data.name).with_suffix(".png").as_posix()
                 )
             if self.config.depths_path is not None:
-                frame["depth_path"] = (
-                    (self.config.data / self.config.depths_path / im_data.name).with_suffix(".png").as_posix()
-                )
+                depth_path = Path(self.config.depths_path)
+                if depth_path.exists():
+                    depth_name = im_data.name.split('-')[-1].split('.')[0] + '.' + im_data.name.split('-')[-1].split('.')[1]
+                    depth_suffix = "_smoothDepth.dmb"
+                    confidence_suffix = "_confidence.dmb"
+                    frame["depth_path"] = (depth_path / (depth_name + depth_suffix)).as_posix()
+                    frame["confidence_path"] = (depth_path / (depth_name + confidence_suffix)).as_posix()
+                else:
+                    CONSOLE.print(
+                        f"[bold yellow]Depth path {depth_path} does not exist. Skipping depth loading for {im_data.name}."
+                    )
+                # frame["depth_path"] = (
+                #     (self.config.data / self.config.depths_path / im_data.name).with_suffix(".png").as_posix()
+                # )
             frames.append(frame)
             if camera_model is not None:
                 assert camera_model == frame["camera_model"], "Multiple camera models are not supported"
@@ -259,6 +275,7 @@ class ColmapDataParser(DataParser):
         image_filenames = []
         mask_filenames = []
         depth_filenames = []
+        confidence_filenames = []
         poses = []
 
         fx = []
@@ -299,7 +316,8 @@ class ColmapDataParser(DataParser):
                 mask_filenames.append(Path(frame["mask_path"]))
             if "depth_path" in frame:
                 depth_filenames.append(Path(frame["depth_path"]))
-
+            if "confidence_path" in frame:
+                confidence_filenames.append(Path(frame["confidence_path"]))
         assert len(mask_filenames) == 0 or (len(mask_filenames) == len(image_filenames)), """
         Different number of image and mask filenames.
         You should check that mask_path is specified for every frame (or zero frames) in transforms.json.
@@ -307,6 +325,10 @@ class ColmapDataParser(DataParser):
         assert len(depth_filenames) == 0 or (len(depth_filenames) == len(image_filenames)), """
         Different number of image and depth filenames.
         You should check that depth_file_path is specified for every frame (or zero frames) in transforms.json.
+        """
+        assert len(confidence_filenames) == 0 or (len(confidence_filenames) == len(image_filenames)), """
+        Different number of image and confidence filenames.
+        You should check that confidence_file_path is specified for every frame (or zero frames) in transforms.json.
         """
         poses = torch.from_numpy(np.array(poses).astype(np.float32))
         poses, transform_matrix = camera_utils.auto_orient_and_center_poses(
@@ -331,7 +353,8 @@ class ColmapDataParser(DataParser):
         image_filenames = [image_filenames[i] for i in indices]
         mask_filenames = [mask_filenames[i] for i in indices] if len(mask_filenames) > 0 else []
         depth_filenames = [depth_filenames[i] for i in indices] if len(depth_filenames) > 0 else []
-
+        confidence_filenames = [confidence_filenames[i] for i in indices] if len(confidence_filenames) > 0 else []
+        
         idx_tensor = torch.tensor(indices, dtype=torch.long)
         poses = poses[idx_tensor]
 
@@ -391,6 +414,7 @@ class ColmapDataParser(DataParser):
             dataparser_transform=transform_matrix,
             metadata={
                 "depth_filenames": depth_filenames if len(depth_filenames) > 0 else None,
+                "confidence_filenames": confidence_filenames if len(confidence_filenames) > 0 else None,
                 "depth_unit_scale_factor": self.config.depth_unit_scale_factor,
                 **metadata,
             },
@@ -398,32 +422,110 @@ class ColmapDataParser(DataParser):
         return dataparser_outputs
 
     def _load_3D_points(self, colmap_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
-        if (colmap_path / "points3D.bin").exists():
-            colmap_points = colmap_utils.read_points3D_binary(colmap_path / "points3D.bin")
-        elif (colmap_path / "points3D.txt").exists():
-            colmap_points = colmap_utils.read_points3D_text(colmap_path / "points3D.txt")
-        else:
-            raise ValueError(f"Could not find points3D.txt or points3D.bin in {colmap_path}")
-        points3D = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
-        points3D = (
-            torch.cat(
-                (
-                    points3D,
-                    torch.ones_like(points3D[..., :1]),
-                ),
-                -1,
+        
+        # points3D_path = colmap_path / "lidar.ply"
+        if self.config.load_combined_ply and self.config.load_ply_path is not None :
+            # Load points3D.ply using Open3D
+            import open3d as o3d
+            pcd = o3d.io.read_point_cloud(str(self.config.load_ply_path))
+            points3D_lidar = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
+            points3D_lidar = (
+                torch.cat(
+                    (
+                        points3D_lidar,
+                        torch.ones_like(points3D_lidar[..., :1]),  # Add homogeneous coordinate
+                    ),
+                    -1,
+                )
+                @ transform_matrix.T
             )
-            @ transform_matrix.T
-        )
-        points3D *= scale_factor
+            points3D_lidar *= scale_factor
+            
+            points3D_l_rgb = torch.from_numpy(np.asarray(pcd.colors, dtype=np.float32) * 255).to(torch.uint8)
 
-        # Load point colours
-        points3D_rgb = torch.from_numpy(np.array([p.rgb for p in colmap_points.values()], dtype=np.uint8))
-        points3D_num_points = torch.tensor([len(p.image_ids) for p in colmap_points.values()], dtype=torch.int64)
+            points3D_l_error = torch.zeros(points3D_lidar.shape[0], dtype=torch.float32)  # Placeholder for error
+            points3D_l_num_points = torch.zeros(points3D_lidar.shape[0], dtype=torch.int64)  # Placeholder for 2D matches
+            if (colmap_path / "points3D.bin").exists():
+                colmap_points = colmap_utils.read_points3D_binary(colmap_path / "points3D.bin")
+            elif (colmap_path / "points3D.txt").exists():
+                colmap_points = colmap_utils.read_points3D_text(colmap_path / "points3D.txt")
+            else:
+                raise ValueError(f"Could not find points3D.txt or points3D.bin in {colmap_path}")
+            points3D_sfm = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
+            points3D_sfm = (
+                torch.cat(
+                    (
+                        points3D_sfm,
+                        torch.ones_like(points3D_sfm[..., :1]),
+                    ),
+                    -1,
+                )
+                @ transform_matrix.T
+            )
+            points3D_sfm *= scale_factor
+
+            # Load point colours
+            points3D_s_rgb = torch.from_numpy(np.array([p.rgb for p in colmap_points.values()], dtype=np.uint8))
+            points3D_s_num_points = torch.tensor([len(p.image_ids) for p in colmap_points.values()], dtype=torch.int64)
+            points3D_s_error = torch.from_numpy(np.array([p.error for p in colmap_points.values()], dtype=np.float32))
+            
+            points3D = torch.cat([points3D_lidar, points3D_sfm], dim=0)
+            points3D_rgb = torch.cat([points3D_l_rgb, points3D_s_rgb], dim=0)
+            points3D_error = torch.cat([points3D_l_error, points3D_s_error], dim=0)
+            points3D_num_points = torch.cat([points3D_l_num_points, points3D_s_num_points], dim=0)
+            
+            CONSOLE.log("[bold green]: Use Combined points from sfm ({}) and {}({}).".format(points3D_sfm.shape[0],self.config.load_ply_path,points3D_lidar.shape[0]))
+        elif self.config.load_ply_path is not None:
+        # if points3D_path.exists():
+            # Load points3D.ply using Open3D
+            import open3d as o3d
+            pcd = o3d.io.read_point_cloud(str(self.config.load_ply_path))
+            points3D = torch.from_numpy(np.asarray(pcd.points, dtype=np.float32))
+            points3D = (
+                torch.cat(
+                    (
+                        points3D,
+                        torch.ones_like(points3D[..., :1]),  # Add homogeneous coordinate
+                    ),
+                    -1,
+                )
+                @ transform_matrix.T
+            )
+            points3D *= scale_factor
+            
+            points3D_rgb = torch.from_numpy(np.asarray(pcd.colors, dtype=np.float32) * 255).to(torch.uint8)
+
+            points3D_error = torch.zeros(points3D.shape[0], dtype=torch.float32)  # Placeholder for error
+            points3D_num_points = torch.zeros(points3D.shape[0], dtype=torch.int64)  # Placeholder for 2D matches
+            CONSOLE.log("[bold green]:tada: Use {}.".format(self.config.load_ply_path))
+        else:
+            if (colmap_path / "points3D.bin").exists():
+                colmap_points = colmap_utils.read_points3D_binary(colmap_path / "points3D.bin")
+            elif (colmap_path / "points3D.txt").exists():
+                colmap_points = colmap_utils.read_points3D_text(colmap_path / "points3D.txt")
+            else:
+                raise ValueError(f"Could not find points3D.txt or points3D.bin in {colmap_path}")
+            points3D = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
+            points3D = (
+                torch.cat(
+                    (
+                        points3D,
+                        torch.ones_like(points3D[..., :1]),
+                    ),
+                    -1,
+                )
+                @ transform_matrix.T
+            )
+            points3D *= scale_factor
+
+            # Load point colours
+            points3D_rgb = torch.from_numpy(np.array([p.rgb for p in colmap_points.values()], dtype=np.uint8))
+            points3D_num_points = torch.tensor([len(p.image_ids) for p in colmap_points.values()], dtype=torch.int64)
+            points3D_error = torch.from_numpy(np.array([p.error for p in colmap_points.values()], dtype=np.float32))
         out = {
             "points3D_xyz": points3D,
             "points3D_rgb": points3D_rgb,
-            "points3D_error": torch.from_numpy(np.array([p.error for p in colmap_points.values()], dtype=np.float32)),
+            "points3D_error": points3D_error,
             "points3D_num_points2D": points3D_num_points,
         }
         if self.config.max_2D_matches_per_3D_point != 0:
@@ -514,7 +616,7 @@ class ColmapDataParser(DataParser):
         def get_fname(parent: Path, filepath: Path) -> Path:
             """Returns transformed file name when downscale factor is applied"""
             rel_part = filepath.relative_to(parent)
-            base_part = parent.parent / (str(parent.name) + f"_{self._downscale_factor}")
+            base_part = parent.parent / (str(parent.name) + f"_{self._downscale_factor}") # parent.name = images
             return base_part / rel_part
 
         filepath = next(iter(image_filenames))
@@ -535,17 +637,19 @@ class ColmapDataParser(DataParser):
                 self._downscale_factor = self.config.downscale_factor
             if self._downscale_factor > 1 and not all(
                 get_fname(self.config.data / self.config.images_path, fp).parent.exists() for fp in image_filenames
-            ):
+            ) or (self.config.resample):
                 # Downscaled images not found
                 # Ask if user wants to downscale the images automatically here
                 CONSOLE.print(
                     f"[bold red]Downscaled images do not exist for factor of {self._downscale_factor}.[/bold red]"
                 )
-                if Confirm.ask(
-                    f"\nWould you like to downscale the images using '{self.config.downscale_rounding_mode}' rounding mode now?",
-                    default=False,
-                    console=CONSOLE,
-                ):
+                # if Confirm.ask(
+                #     f"\nWould you like to downscale the images using '{self.config.downscale_rounding_mode}' rounding mode now?",
+                #     default=False,
+                #     console=CONSOLE,
+                # ):
+                if True:
+                    CONSOLE.print("[bold yellow]Auto downscaling images..., see colmap_dataparser.py line 597")
                     # Install the method
                     self._downscale_images(
                         image_filenames,
@@ -581,8 +685,9 @@ class ColmapDataParser(DataParser):
             if len(mask_filenames) > 0:
                 assert self.config.masks_path is not None
                 mask_filenames = [get_fname(self.config.data / self.config.masks_path, fp) for fp in mask_filenames]
-            if len(depth_filenames) > 0:
-                assert self.config.depths_path is not None
-                depth_filenames = [get_fname(self.config.data / self.config.depths_path, fp) for fp in depth_filenames]
+            ## 不需要处理depth的分辨率和名字
+            # if len(depth_filenames) > 0:
+            #     assert self.config.depths_path is not None
+            #     depth_filenames = [get_fname(self.config.data / self.config.depths_path, fp) for fp in depth_filenames]
         assert isinstance(self._downscale_factor, int)
         return image_filenames, mask_filenames, depth_filenames, self._downscale_factor

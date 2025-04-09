@@ -281,7 +281,14 @@ class Trainer:
                         step=step,
                         avg_over_steps=True,
                     )
-
+                if self.training_state == "training" and self.step % 1000 == 0:  # 每 1000 步保存一次
+                    progress_ratio = int((self.step / self.config.max_num_iterations) * 100)  # 计算完成百分比
+                    progress_path = os.path.join(self.config.pipeline.model.progress_path, "progress")  # 保存路径
+                    if not os.path.exists(self.config.pipeline.model.progress_path):
+                        os.makedirs(self.config.pipeline.model.progress_path, exist_ok=True)
+                    with open(progress_path, "w") as f:
+                        f.write(f"{progress_ratio}")
+                        
                 self._update_viewer_state(step)
 
                 # a batch of train rays
@@ -397,8 +404,8 @@ class Trainer:
             time.sleep(0.03)  # sleep to allow buffer to reset
             CONSOLE.log("Viewer failed. Continuing training.")
         CONSOLE.print("Use ctrl+c to quit", justify="center")
-        while True:
-            time.sleep(0.01)
+        # while True:
+        #     time.sleep(0.01)
 
     @check_viewer_enabled
     def _update_viewer_rays_per_sec(self, train_t: TimeWriter, vis_t: TimeWriter, step: int) -> None:
@@ -549,6 +556,9 @@ class Trainer:
         if step_check(step, self.config.steps_per_eval_image):
             with TimeWriter(writer, EventName.TEST_RAYS_PER_SEC, write=False) as test_t:
                 metrics_dict, images_dict = self.pipeline.get_eval_image_metrics_and_images(step=step)
+            
+            test_t.duration = max(test_t.duration, 1e-6)  # 设置最小值
+
             writer.put_time(
                 name=EventName.TEST_RAYS_PER_SEC,
                 duration=metrics_dict["num_rays"] / test_t.duration,

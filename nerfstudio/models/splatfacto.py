@@ -44,7 +44,8 @@ from nerfstudio.utils.math import k_nearest_sklearn, random_quat_tensor
 from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.spherical_harmonics import RGB2SH, SH2RGB, num_sh_bases
-
+import tifffile
+import os
 
 def resize_image(image: torch.Tensor, d: int):
     """
@@ -166,7 +167,22 @@ class SplatfactoModelConfig(ModelConfig):
     """Regularization term for opacity in MCMC strategy. Only enabled when using MCMC strategy"""
     mcmc_scale_reg: float = 0.01
     """Regularization term for scale in MCMC strategy. Only enabled when using MCMC strategy"""
-
+    ## depth regulation config 
+    use_depth_loss: bool = False
+    '''Enable depth loss while training'''
+    vis_depth: str = ""
+    '''Visualize depth map during training if Needed'''
+    
+    # depth_loss_type: DepthLossType = DepthLossType.EdgeAwareLogL1
+    # """Choose which depth loss to train with Literal["MSE", "LogL1", "HuberL1", "L1", "EdgeAwareLogL1", "PearsonDepth"]"""
+    # depth_tolerance: float = 0.1
+    # """Min depth value for depth loss"""
+    depth_lambda: float = 0.0
+    """Regularizer for depth loss"""
+    progress_path: str = ""
+    """Path to save the progress log. If not specified, no progress log will be saved."""
+    
+    
 
 class SplatfactoModel(Model):
     """Nerfstudio's implementation of Gaussian Splatting
@@ -603,7 +619,7 @@ class SplatfactoModel(Model):
             "accumulation": alpha.squeeze(0),  # type: ignore
             "background": background,  # type: ignore
         }  # type: ignore
-
+            
     def get_gt_img(self, image: torch.Tensor):
         """Compute groundtruth image with iteration dependent downscale factor for evaluation purpose
 
@@ -659,7 +675,6 @@ class SplatfactoModel(Model):
         """
         gt_img = self.composite_with_background(self.get_gt_img(batch["image"]), outputs["background"])
         pred_img = outputs["rgb"]
-
         # Set masked part of both ground-truth and rendered image to black.
         # This is a little bit sketchy for the SSIM loss.
         if "mask" in batch:
@@ -689,6 +704,51 @@ class SplatfactoModel(Model):
             "main_loss": (1 - self.config.ssim_lambda) * Ll1 + self.config.ssim_lambda * simloss,
             "scale_reg": scale_reg,
         }
+        
+        # if len(self.config.vis_depth) >0:
+        #     vis_gt_image = gt_img.clone()
+        #     vis_gt_image = vis_gt_image.permute(2,0,1).unsqueeze(0)
+        #     gt_depth = batch["depth"].unsqueeze(0).unsqueeze(0).cuda()
+
+        #     pred_depth = outputs["depth"].permute(2,0,1).unsqueeze(0)
+        #     pred_resized = torch.nn.functional.interpolate(pred_depth, size=(gt_depth.shape[2], gt_depth.shape[3]), mode="bilinear", align_corners=False)
+
+        #     gt_conf = batch["depth_conf"].unsqueeze(0).unsqueeze(0).cuda()
+        #     if not os.path.exists(self.config.vis_depth):
+        #         os.makedirs(self.config.vis_depth)
+        #     self.save_depth_tensor_to_tiff(gt_depth, os.path.join(self.config.vis_depth,"{}-gt.tiff".format(batch["image_idx"])))
+        #     self.save_depth_tensor_to_tiff(pred_resized, os.path.join(self.config.vis_depth,"{}-rendered.tiff".format(batch["image_idx"])))
+        #     self.save_depth_tensor_to_tiff(gt_conf, os.path.join(self.config.vis_depth,"{}-confidence_mask.tiff".format(batch["image_idx"])))
+        #     self.save_depth_tensor_to_tiff(vis_gt_image, os.path.join(self.config.vis_depth,"{}-gt_image.tiff".format(batch["image_idx"])))
+        
+        # ! TODO 添加depth loss
+        if self.config.use_depth_loss:
+            pred_depth = outputs["depth"].permute(2,0,1).unsqueeze(0)
+            gt_depth = batch["depth"].unsqueeze(0).unsqueeze(0).cuda()
+
+            gt_conf = batch["depth_conf"].unsqueeze(0).unsqueeze(0).cuda()
+            
+            pred_resized = torch.nn.functional.interpolate(pred_depth, size=(gt_depth.shape[2], gt_depth.shape[3]), mode="bilinear", align_corners=False)
+
+            if len(self.config.vis_depth) >0:
+                if not os.path.exists(self.config.vis_depth):
+                    os.makedirs(self.config.vis_depth)
+                self.save_depth_tensor_to_tiff(gt_depth, os.path.join(self.config.vis_depth,"{}-gt.tiff".format(batch["image_idx"])))
+                # self.save_depth_tensor_to_tiff(vis_gt_image, os.path.join(self.config.vis_depth,"{}-gt_image.tiff".format(batch["image_idx"])))
+                self.save_depth_tensor_to_tiff(pred_resized, os.path.join(self.config.vis_depth,"{}-rendered.tiff".format(batch["image_idx"])))
+                self.save_depth_tensor_to_tiff(gt_conf, os.path.join(self.config.vis_depth,"{}-confidence_mask.tiff".format(batch["image_idx"])))
+            
+            gt_valid_mask = (gt_depth < 5) & torch.isfinite(gt_depth) # 确保深度值有效
+
+            valid_pixels = torch.abs((pred_resized  - gt_depth))[gt_valid_mask]
+            # filtered_gt_conf = gt_conf[gt_valid_mask]
+            # depth_loss =  (valid_pixels[filtered_gt_conf==0]).mean() \
+            #                + (valid_pixels[filtered_gt_conf==1]).mean()*0.8 \
+            #               + (valid_pixels[filtered_gt_conf==2]).mean()*1.2
+            depth_loss = valid_pixels.mean()
+            # depth_loss = valid_pixels.mean()
+            loss_dict["depth_loss"] = 0.2*depth_loss
+            # pass
 
         # Losses for mcmc
         if self.config.strategy == "mcmc":
@@ -770,3 +830,29 @@ class SplatfactoModel(Model):
         images_dict = {"img": combined_rgb}
 
         return metrics_dict, images_dict
+    
+    def save_depth_tensor_to_tiff(self, tensor, output_path):
+        """
+        将PyTorch tensor保存为TIFF格式的深度图
+        Args:
+            tensor: PyTorch tensor (深度图数据，通常是[H, W]或[1, H, W]的float类型)
+            output_path: 保存路径，例如 'depth_map.tiff'
+        """
+        # 确保tensor是CPU上的
+        if tensor.is_cuda:
+            tensor = tensor.cpu()
+        
+        # 转换为numpy数组
+        if len(tensor.shape) == 3:  # 如果是[1, H, W]格式
+            tensor = tensor.squeeze(0)  # 移除通道维度，变为[H, W]
+        
+        if len(tensor.shape) == 4:
+            if tensor.shape[1] ==3:
+                tensor = tensor.squeeze(0)
+            else:
+                tensor = tensor.squeeze(0).squeeze(0)  # 移除通道维度，变为[H, W]
+        depth_array = tensor.detach().numpy()
+        
+        # 使用tifffile保存为TIFF格式
+        # TIFF支持直接存储float32数据，无需归一化到0-255
+        tifffile.imwrite(output_path, depth_array, photometric='minisblack')

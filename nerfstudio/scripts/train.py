@@ -251,7 +251,7 @@ def main(config: TrainerConfig) -> None:
     config.set_timestamp()
 
     # print and save config
-    config.print_to_terminal()
+    # config.print_to_terminal()
     config.save_config()
 
     launch(

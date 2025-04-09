@@ -133,8 +133,14 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             self.dataparser.downscale_factor = 1  # Avoid opening images
         self.includes_time = self.dataparser.includes_time
         self.train_dataparser_outputs: DataparserOutputs = self.dataparser.get_dataparser_outputs(split="train")
+        # metadata = self.train_dataparser_outputs.metadata
         self.train_dataset = self.create_train_dataset()
         self.eval_dataset = self.create_eval_dataset()
+        self.load_depths = (
+            True
+            if ("depth_filenames" in self.train_dataparser_outputs.metadata)
+            else False
+        )
         if len(self.train_dataset) > 500 and self.config.cache_images == "gpu":
             CONSOLE.print(
                 "Train dataset has over 500 images, overriding cache_images to cpu. If you still get OOM errors or segfault, please consider seting cache_images to 'disk'",

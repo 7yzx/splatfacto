@@ -312,7 +312,8 @@ class WandbWriter(Writer):
             project=os.environ.get("WANDB_PROJECT", project_name),
             dir=os.environ.get("WANDB_DIR", str(log_dir)),
             name=os.environ.get("WANDB_NAME", experiment_name),
-            reinit=True,
+            reinit=True
+            # mode="offline",
         )
 
     def write_image(self, name: str, image: Float[Tensor, "H W C"], step: int) -> None:

@@ -26,7 +26,7 @@ from torch import Tensor, nn
 from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.utils.math import masked_reduction, normalized_depth_scale_and_shift
-
+from torchmetrics.functional.regression import pearson_corrcoef
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
 
@@ -44,7 +44,9 @@ class DepthLossType(Enum):
     DS_NERF = 1
     URF = 2
     SPARSENERF_RANKING = 3
-
+    
+    MSE = 4
+    PEARSON_LOSS = 5
 
 FORCE_PSEUDODEPTH_LOSS = False
 PSEUDODEPTH_COMPATIBLE_LOSSES = (DepthLossType.SPARSENERF_RANKING,)
