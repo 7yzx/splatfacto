@@ -492,3 +492,28 @@ def rotmat2qvec(R):
     if qvec[0] < 0:
         qvec *= -1
     return qvec
+import math
+def focal2fov(focal, pixels):
+    return 2*math.atan(pixels/(2*focal))
+
+def camera_to_JSON(id, R,T, image_name, width, height, focal_y, focal_x):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = R
+    Rt[:3, 3] = T
+    Rt[3, 3] = 1.0
+
+    W2C = np.linalg.inv(Rt)
+    pos = W2C[:3, 3]
+    rot = W2C[:3, :3]
+    serializable_array_2d = [x.tolist() for x in rot]
+    camera_entry = {
+        'id' : id,
+        'img_name' : image_name,
+        'width' : width,
+        'height' : height,
+        'position': pos.tolist(),
+        'rotation': serializable_array_2d,
+        'fy' : focal_y,
+        'fx' : focal_x
+    }
+    return camera_entry

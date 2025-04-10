@@ -21,12 +21,13 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import List, Literal, Optional, Type
-
+import os
+import json
 import numpy as np
 import torch
 from PIL import Image
 from rich.prompt import Confirm
-
+import random
 from nerfstudio.cameras import camera_utils
 from nerfstudio.cameras.cameras import CAMERA_MODEL_TO_TYPE, Cameras
 from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
@@ -108,6 +109,18 @@ class ColmapDataParserConfig(DataParserConfig):
     load_combined_ply: bool = False
     """Whether to load the combined using sfm and lidar"""
     
+    reshoot_mode: bool = False
+    """Whether to load the reshoot mode"""
+    base_image_path: Optional[Path] = None
+    """Must Need for reshoot, is the base image path"""
+    reshoot_image_path : Optional[Path] = None
+    """Reshoot image path for reshoot"""
+    select_base_ratio : float = 0.1
+    """select base ratio for reshoot"""
+    
+    json_cams_path: Path = Path()
+    """Path to save the cameras.json file"""
+    
 class ColmapDataParser(DataParser):
     """COLMAP DatasetParser.
     Expects a folder with the following structure:
@@ -147,6 +160,7 @@ class ColmapDataParser(DataParser):
 
         cameras = {}
         frames = []
+        json_cams = []
         camera_model = None
 
         # Parse cameras
@@ -180,6 +194,17 @@ class ColmapDataParser(DataParser):
                 "colmap_im_id": im_id,
             }
             frame.update(cameras[im_data.camera_id])
+            
+            # for cameras.json
+            R = rotation
+            T = im_data.tvec
+            focal_length_x = cameras[im_data.camera_id]['fl_x']
+            focal_length_y = cameras[im_data.camera_id]['fl_y']
+            width = cameras[im_data.camera_id]['w']
+            height = cameras[im_data.camera_id]['h']
+            image_name = im_data.name
+            json_cam = colmap_utils.camera_to_JSON(im_data.camera_id,R,T,image_name,width,height,focal_length_y,focal_length_x)
+            json_cams.append(json_cam)
             if self.config.masks_path is not None:
                 frame["mask_path"] = (
                     (self.config.data / self.config.masks_path / im_data.name).with_suffix(".png").as_posix()
@@ -205,6 +230,10 @@ class ColmapDataParser(DataParser):
             else:
                 camera_model = frame["camera_model"]
 
+        with open(os.path.join(self.config.json_cams_path, "cameras.json"), 'w') as file:
+            json.dump(json_cams, file)
+        CONSOLE.print("[green]Cameras.json file saved successfully in {}!".format(self.config.json_cams_path))
+        
         out = {}
         out["frames"] = frames
         if self.config.assume_colmap_world_coordinate_convention:
@@ -257,7 +286,18 @@ class ColmapDataParser(DataParser):
                 raise ValueError(f"Unknown eval mode {self.config.eval_mode}")
 
             if split == "train":
-                indices = i_train
+                if self.config.reshoot_mode:
+                    reshoot_images = self._get_reshoot_images()["reshoot_image_files"]
+                    base_images = self._get_base_images()["base_image_files"]
+                    num_base_images = int(len(base_images) * self.config.select_base_ratio)  # Example: Use 5 base images
+                    selected_base_images = random.sample(base_images, num_base_images)
+                    training_images = reshoot_images + selected_base_images
+                    training_image_set = set(training_images)
+                    indices = [i for i, path in enumerate(image_filenames) if path.name in training_image_set]
+                    indices = np.array(indices, dtype=np.int32)
+                    CONSOLE.print('[yellow]Training reshoot images :{}'.format(len(indices)))
+                else:
+                    indices = i_train
             elif split in ["val", "test"]:
                 indices = i_eval
             else:
@@ -404,6 +444,11 @@ class ColmapDataParser(DataParser):
         if self.config.load_3D_points:
             # Load 3D points
             metadata.update(self._load_3D_points(colmap_path, transform_matrix, scale_factor))
+        # if self.config.reshoot_mode:
+        #     base_image_filenames = self._get_base_images()
+        #     metadata.update(base_image_filenames)
+        #     reshoot_image_filenames = self._get_reshoot_images()
+        #     metadata.update(reshoot_image_filenames)
 
         dataparser_outputs = DataparserOutputs(
             image_filenames=image_filenames,
@@ -691,3 +736,46 @@ class ColmapDataParser(DataParser):
             #     depth_filenames = [get_fname(self.config.data / self.config.depths_path, fp) for fp in depth_filenames]
         assert isinstance(self._downscale_factor, int)
         return image_filenames, mask_filenames, depth_filenames, self._downscale_factor
+
+    def _get_base_images(self):
+        """
+        Get all image filenames with .jpg extension from the base image path.
+
+        Returns:
+            List[str]: A list of image filenames ending with .jpg.
+        """
+        if not self.config.base_image_path:
+            raise ValueError("Base image path is not specified in the configuration.")
+
+        base_image_path = Path(self.config.base_image_path)
+        if not base_image_path.exists():
+            raise FileNotFoundError(f"Base image path {base_image_path} does not exist.")
+
+        # Get all .jpg files in the directory
+        image_files = sorted([str(file.name) for file in base_image_path.glob("*.jpg")])
+
+        if not image_files:
+            raise ValueError(f"No .jpg files found in the directory {base_image_path}.")
+
+        return {"base_image_files": image_files}
+    
+    def _get_reshoot_images(self):
+        """
+        Get all image filenames with .jpg extension from the reshoot image path.
+
+        Returns:
+            List[str]: A list of image filenames ending with .jpg.
+        """
+        if not self.config.reshoot_image_path:
+            images_path = Path(self.config.data / self.config.images_path)
+            all_image_files = sorted([str(file.name) for file in images_path.glob("*.jpg")])
+        else:
+            all_image_files = sorted([str(file.name) for file in self.config.reshoot_image_path.glob("*.jpg")])
+       
+        base_images = self._get_base_images()["base_image_files"]
+        # Exclude base images from all images to get reshoot images
+        reshoot_images = [img for img in all_image_files if img not in base_images]
+        if not reshoot_images:
+            raise ValueError(f"No reshoot images found in the directory")
+
+        return {"reshoot_image_files": reshoot_images}
